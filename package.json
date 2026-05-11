@@ -1,0 +1,34 @@
+{
+  "name": "remote-desktop-service",
+  "version": "1.0.0",
+  "description": "Web-based remote desktop access service",
+  "main": "server.js",
+  "bin": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "node build.js",
+    "install-service": "node install-service.js",
+    "uninstall-service": "node uninstall-service.js"
+  },
+  "pkg": {
+    "assets": [
+      "public/**/*",
+      "config.js",
+      "input-helper.js",
+      "node_modules/screenshot-desktop/**/*"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "dist"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0",
+    "screenshot-desktop": "^1.15.0"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1",
+    "node-windows": "^1.0.0-beta.8"
+  }
+}
