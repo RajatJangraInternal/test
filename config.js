@@ -18,6 +18,19 @@ module.exports = {
   // Allow remote mouse & keyboard control
   ENABLE_INPUT: true,
 
+  // ---- Cloudflare Tunnel ----
+  // Enable Cloudflare Tunnel for remote access across networks
+  CLOUDFLARE_TUNNEL_ENABLED: true,
+
+  // Tunnel token from Cloudflare Zero Trust dashboard (for permanent subdomain)
+  // Leave empty to use a quick tunnel with a random *.trycloudflare.com URL
+  // To get a token: https://one.dash.cloudflare.com → Networks → Tunnels → Create
+  CLOUDFLARE_TUNNEL_TOKEN: '',
+
+  // Your hostname/subdomain (e.g., 'remote.yourdomain.com')
+  // Only used with a tunnel token. Set this to the hostname you configured in the dashboard.
+  CLOUDFLARE_TUNNEL_HOSTNAME: '',
+
   // Service name when installed as Windows Service
   SERVICE_NAME: 'System Network Helper',
 

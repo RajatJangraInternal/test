@@ -7,10 +7,13 @@ const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
+const fs = require('fs');
 const screenshot = require('screenshot-desktop');
 const { execSync } = require('child_process');
 const config = require('./config');
 const { InputHelper, VK } = require('./input-helper');
+const { spawn } = require('child_process');
+const https = require('https');
 
 const app = express();
 const server = http.createServer(app);
@@ -83,7 +86,7 @@ function autoSetup() {
         console.log(`  http://${ip.address}:${config.PORT}  (${ip.name})`);
       });
     }
-  } catch (e) {}
+  } catch (e) { }
 }
 
 // ---- WebSocket handling ----
@@ -225,7 +228,7 @@ async function captureLoop() {
 
         // Send PNG directly (no sharp needed)
         for (const ws of activeClients) {
-          try { ws.send(imgBuffer, { binary: true }); } catch {}
+          try { ws.send(imgBuffer, { binary: true }); } catch { }
         }
       } catch (err) {
         console.error('[CAPTURE] Error:', err.message);
@@ -234,6 +237,188 @@ async function captureLoop() {
 
     const elapsed = Date.now() - startTime;
     await new Promise((r) => setTimeout(r, Math.max(0, interval - elapsed)));
+  }
+}
+
+// ---- Cloudflare Tunnel ----
+const CONNECTION_INFO_FILE = path.join(__dirname, 'connection-info.txt');
+const CLOUDFLARED_PATH = path.join(__dirname, 'cloudflared.exe');
+const CLOUDFLARED_URL = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe';
+
+let tunnelProcess = null;
+
+// Download cloudflared.exe if not present
+async function ensureCloudflared() {
+  if (fs.existsSync(CLOUDFLARED_PATH)) {
+    console.log('[TUNNEL] cloudflared.exe found.');
+    return true;
+  }
+
+  console.log('[TUNNEL] Downloading cloudflared.exe...');
+  return new Promise((resolve) => {
+    const file = fs.createWriteStream(CLOUDFLARED_PATH);
+
+    function download(url) {
+      https.get(url, (res) => {
+        // Follow redirects
+        if (res.statusCode === 301 || res.statusCode === 302) {
+          return download(res.headers.location);
+        }
+        if (res.statusCode !== 200) {
+          console.error(`[TUNNEL] Download failed: HTTP ${res.statusCode}`);
+          file.close();
+          try { fs.unlinkSync(CLOUDFLARED_PATH); } catch {}
+          return resolve(false);
+        }
+
+        const totalBytes = parseInt(res.headers['content-length'], 10) || 0;
+        let downloaded = 0;
+
+        res.on('data', (chunk) => {
+          downloaded += chunk.length;
+          if (totalBytes > 0) {
+            const pct = Math.round((downloaded / totalBytes) * 100);
+            process.stdout.write(`\r[TUNNEL] Downloading... ${pct}%`);
+          }
+        });
+
+        res.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          console.log('\n[TUNNEL] cloudflared.exe downloaded successfully.');
+          resolve(true);
+        });
+      }).on('error', (err) => {
+        file.close();
+        try { fs.unlinkSync(CLOUDFLARED_PATH); } catch {}
+        console.error('[TUNNEL] Download error:', err.message);
+        resolve(false);
+      });
+    }
+
+    download(CLOUDFLARED_URL);
+  });
+}
+
+async function startTunnel() {
+  if (!config.CLOUDFLARE_TUNNEL_ENABLED) return;
+
+  const ready = await ensureCloudflared();
+  if (!ready) {
+    console.log('[TUNNEL] Cannot start tunnel without cloudflared.exe');
+    return;
+  }
+
+  const args = [];
+
+  if (config.CLOUDFLARE_TUNNEL_TOKEN) {
+    // Named tunnel mode: permanent subdomain on your domain
+    args.push('tunnel', 'run', '--token', config.CLOUDFLARE_TUNNEL_TOKEN);
+    console.log('[TUNNEL] Starting named Cloudflare Tunnel...');
+  } else {
+    // Quick tunnel mode: random *.trycloudflare.com URL
+    args.push('tunnel', '--url', `http://localhost:${config.PORT}`);
+    console.log('[TUNNEL] Starting quick Cloudflare Tunnel (random URL)...');
+  }
+
+  tunnelProcess = spawn(CLOUDFLARED_PATH, args, {
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let tunnelUrl = null;
+
+  // Parse output for the tunnel URL
+  const handleOutput = (data) => {
+    const text = data.toString();
+    // cloudflared logs the URL in various formats
+    const urlMatch = text.match(/https:\/\/[\w.-]+\.trycloudflare\.com/);
+    if (urlMatch && !tunnelUrl) {
+      tunnelUrl = urlMatch[0];
+      writeConnectionFile(tunnelUrl);
+    }
+
+    // Log cloudflared output for debugging
+    const lines = text.split('\n').filter(l => l.trim());
+    lines.forEach(line => {
+      // Only log important lines
+      if (line.includes('https://') || line.includes('ERR') ||
+          line.includes('Starting') || line.includes('Registered') ||
+          line.includes('Connection')) {
+        console.log(`[TUNNEL] ${line.trim()}`);
+      }
+    });
+  };
+
+  tunnelProcess.stdout.on('data', handleOutput);
+  tunnelProcess.stderr.on('data', handleOutput);
+
+  tunnelProcess.on('error', (err) => {
+    console.error('[TUNNEL] Failed to start cloudflared:', err.message);
+  });
+
+  tunnelProcess.on('exit', (code) => {
+    console.log(`[TUNNEL] cloudflared exited with code ${code}`);
+    tunnelProcess = null;
+  });
+
+  // For named tunnel mode, write connection info immediately
+  if (config.CLOUDFLARE_TUNNEL_TOKEN && config.CLOUDFLARE_TUNNEL_HOSTNAME) {
+    const url = `https://${config.CLOUDFLARE_TUNNEL_HOSTNAME}`;
+    writeConnectionFile(url);
+  }
+}
+
+function writeConnectionFile(url) {
+  const os = require('os');
+  const interfaces = os.networkInterfaces();
+  const localIPs = [];
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        localIPs.push({ name, address: iface.address });
+      }
+    }
+  }
+
+  const lines = [
+    '==========================================',
+    '  Remote Desktop - Connection Info',
+    '==========================================',
+    '',
+    '  --- REMOTE ACCESS (ANY NETWORK) ---',
+    `  URL: ${url}`,
+    '',
+    '  --- LOCAL ACCESS (SAME NETWORK) ---',
+    ...localIPs.map(ip => `  http://${ip.address}:${config.PORT}  (${ip.name})`),
+    '',
+    `  Password: ${config.PASSWORD}`,
+    `  Generated: ${new Date().toLocaleString()}`,
+    '',
+    '  Open the URL above in any browser to',
+    '  access this computer from anywhere.',
+    '==========================================',
+  ].join('\n');
+
+  fs.writeFileSync(CONNECTION_INFO_FILE, lines, 'utf-8');
+
+  console.log('================================================');
+  console.log('  CLOUDFLARE TUNNEL ACTIVE');
+  console.log(`  URL: ${url}`);
+  console.log(`  Saved to: ${CONNECTION_INFO_FILE}`);
+  console.log('================================================');
+}
+
+function stopTunnel() {
+  if (tunnelProcess) {
+    try {
+      tunnelProcess.kill('SIGTERM');
+      // On Windows, force kill after a short delay
+      setTimeout(() => {
+        try { tunnelProcess?.kill('SIGKILL'); } catch {}
+      }, 2000);
+    } catch {}
+    tunnelProcess = null;
   }
 }
 
@@ -252,12 +437,16 @@ async function main() {
     }
   }
 
-  server.listen(config.PORT, '0.0.0.0', () => {
+  server.listen(config.PORT, '0.0.0.0', async () => {
     console.log('================================================');
     console.log('  Remote Desktop Service - Running');
     console.log(`  Port: ${config.PORT} | FPS: ${config.FPS}`);
     console.log(`  Input: ${inputAvailable ? 'ON' : 'OFF'}`);
     console.log('================================================');
+
+    // Start Cloudflare Tunnel
+    await startTunnel();
+
     captureLoop();
   });
 }
@@ -267,6 +456,7 @@ main();
 process.on('SIGINT', () => {
   captureRunning = false;
   input.stop();
+  stopTunnel();
   wss.close();
   server.close();
   process.exit(0);
@@ -274,6 +464,7 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
   captureRunning = false;
   input.stop();
+  stopTunnel();
   wss.close();
   server.close();
   process.exit(0);
