@@ -1,6 +1,6 @@
 // ============================================
-// Build Script - Creates standalone .exe
-// Uses esbuild + Node.js SEA (Single Executable Application)
+// Build Script - Creates portable deployment folder
+// Includes node.exe so target PC needs NO install
 // Run: npm run build
 // ============================================
 
@@ -9,138 +9,96 @@ const fs = require('fs');
 const path = require('path');
 
 const distDir = path.join(__dirname, 'dist');
-const bundlePath = path.join(distDir, 'bundle.js');
-const seaConfigPath = path.join(distDir, 'sea-config.json');
-const seaBlobPath = path.join(distDir, 'sea-prep.blob');
-const exePath = path.join(distDir, 'RemoteDesktop.exe');
-const nodePath = process.execPath; // path to current node.exe
+const nodePath = process.execPath;
 
 console.log('==========================================');
-console.log('  Building Remote Desktop Service .exe');
-console.log('  Using: esbuild + Node.js SEA');
+console.log('  Building Remote Desktop Service');
 console.log('==========================================\n');
 
-// 1. Ensure dist directory
+// 1. Clean and create dist directory
+console.log('[1/4] Preparing dist folder...');
 if (fs.existsSync(distDir)) {
-  // Clean previous build artifacts
-  for (const f of ['bundle.js', 'sea-config.json', 'sea-prep.blob']) {
-    const p = path.join(distDir, f);
-    if (fs.existsSync(p)) fs.unlinkSync(p);
-  }
-} else {
-  fs.mkdirSync(distDir, { recursive: true });
+  fs.rmSync(distDir, { recursive: true, force: true });
 }
+fs.mkdirSync(distDir, { recursive: true });
+console.log('  Done.\n');
 
-// 2. Install esbuild if needed
-console.log('[1/5] Ensuring esbuild is available...');
-try {
-  execSync('npx -y esbuild --version', { stdio: 'pipe', windowsHide: true });
-  console.log('  esbuild is available.\n');
-} catch {
-  console.log('  esbuild will be downloaded on first use.\n');
+// 2. Copy source files
+console.log('[2/4] Copying source files...');
+const filesToCopy = ['server.js', 'config.js', 'input-helper.js', 'package.json'];
+for (const file of filesToCopy) {
+  fs.copyFileSync(path.join(__dirname, file), path.join(distDir, file));
+  console.log(`  Copied ${file}`);
 }
-
-// 3. Bundle with esbuild (all dependencies into a single file)
-console.log('[2/5] Bundling with esbuild...');
-try {
-  execSync(
-    `npx -y esbuild server.js --bundle --platform=node --target=node18 --outfile="${bundlePath}" --external:screenshot-desktop`,
-    { stdio: 'inherit', cwd: __dirname }
-  );
-  console.log('  Bundle created.\n');
-} catch (e) {
-  console.error('  Bundle failed:', e.message);
-  process.exit(1);
-}
-
-// 4. Copy assets that can't be bundled
-console.log('[3/5] Copying assets...');
-
 // Copy public folder
-const publicSrc = path.join(__dirname, 'public');
-const publicDst = path.join(distDir, 'public');
-copyDirSync(publicSrc, publicDst);
+copyDirSync(path.join(__dirname, 'public'), path.join(distDir, 'public'));
+console.log('  Copied public/');
+console.log('');
 
-// Copy config.js (so user can edit it in dist)
-fs.copyFileSync(
-  path.join(__dirname, 'config.js'),
-  path.join(distDir, 'config.js')
-);
-
-// Copy input-helper.js
-fs.copyFileSync(
-  path.join(__dirname, 'input-helper.js'),
-  path.join(distDir, 'input-helper.js')
-);
-
-// Copy screenshot-desktop (native module, must be external)
-const screenshotSrc = path.join(__dirname, 'node_modules', 'screenshot-desktop');
-const screenshotDst = path.join(distDir, 'node_modules', 'screenshot-desktop');
-copyDirSync(screenshotSrc, screenshotDst);
-
-console.log('  Assets copied.\n');
-
-// 5. Create SEA config
-console.log('[4/5] Creating SEA blob...');
-const seaConfig = {
-  main: bundlePath,
-  output: seaBlobPath,
-  disableExperimentalSEAWarning: true,
-  useSnapshot: false,
-  useCodeCache: true,
-};
-fs.writeFileSync(seaConfigPath, JSON.stringify(seaConfig, null, 2));
-
-// Generate the SEA blob
+// 3. Install production dependencies in dist
+console.log('[3/4] Installing dependencies (production only)...');
 try {
-  execSync(`node --experimental-sea-config "${seaConfigPath}"`, {
+  execSync('npm install --production --no-optional', {
     stdio: 'inherit',
     cwd: distDir,
+    windowsHide: true,
   });
-  console.log('  SEA blob created.\n');
+  console.log('\n  Dependencies installed.\n');
 } catch (e) {
-  console.error('  SEA blob creation failed:', e.message);
+  console.error('  npm install failed:', e.message);
   process.exit(1);
 }
 
-// 6. Create the executable
-console.log('[5/5] Creating executable...');
+// 4. Copy node.exe and create launcher
+console.log('[4/4] Creating launcher...');
+
+// Copy node.exe for portability
+fs.copyFileSync(nodePath, path.join(distDir, 'node.exe'));
+console.log('  Copied node.exe');
+
+// Create RemoteDesktop.bat launcher
+const batContent = [
+  '@echo off',
+  'cd /d "%~dp0"',
+  'node.exe server.js',
+  'pause',
+].join('\r\n');
+fs.writeFileSync(path.join(distDir, 'RemoteDesktop.bat'), batContent);
+console.log('  Created RemoteDesktop.bat');
+
+// Create a silent/hidden launcher (RemoteDesktop-Silent.vbs)
+const vbsContent = [
+  'Set fso = CreateObject("Scripting.FileSystemObject")',
+  'dir = fso.GetParentFolderName(WScript.ScriptFullName)',
+  'Set shell = CreateObject("WScript.Shell")',
+  'shell.Run Chr(34) & dir & "\\node.exe" & Chr(34) & " " & Chr(34) & dir & "\\server.js" & Chr(34), 0, False',
+].join('\r\n');
+fs.writeFileSync(path.join(distDir, 'RemoteDesktop-Silent.vbs'), vbsContent);
+console.log('  Created RemoteDesktop-Silent.vbs (runs hidden)');
+
+// Remove unnecessary files from dist
 try {
-  // Copy node.exe as our base
-  fs.copyFileSync(nodePath, exePath);
-
-  // Remove the signature (required on Windows before injecting)
-  try {
-    execSync(`npx -y postject --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 "${exePath}" NODE_SEA_BLOB "${seaBlobPath}" --overwrite`, {
-      stdio: 'inherit',
-      cwd: distDir,
-    });
-  } catch (e) {
-    console.error('  Postject injection failed:', e.message);
-    process.exit(1);
-  }
-
-  console.log('\n  Executable created!\n');
-} catch (e) {
-  console.error('  Failed to create executable:', e.message);
-  process.exit(1);
-}
-
-// 7. Cleanup temp files
-try {
-  fs.unlinkSync(bundlePath);
-  fs.unlinkSync(seaConfigPath);
-  fs.unlinkSync(seaBlobPath);
+  const distPkg = path.join(distDir, 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(distPkg, 'utf-8'));
+  delete pkg.devDependencies;
+  delete pkg.pkg;
+  delete pkg.scripts;
+  fs.writeFileSync(distPkg, JSON.stringify(pkg, null, 2));
 } catch {}
 
-console.log('==========================================');
+console.log('\n==========================================');
 console.log('  BUILD COMPLETE!');
-console.log(`  Output: ${exePath}`);
+console.log('  Output: dist/');
+console.log('');
+console.log('  Contents:');
+console.log('    RemoteDesktop.bat       - Run with console');
+console.log('    RemoteDesktop-Silent.vbs - Run hidden (no window)');
+console.log('    config.js               - Edit password/settings');
 console.log('');
 console.log('  To deploy to another computer:');
 console.log('  1. Copy the entire "dist" folder');
 console.log('  2. Edit config.js to set your password');
-console.log('  3. Run RemoteDesktop.exe (as Admin)');
+console.log('  3. Right-click RemoteDesktop.bat → Run as Admin');
 console.log('==========================================');
 
 function copyDirSync(src, dest) {
