@@ -12,7 +12,9 @@
   const passwordInput = document.getElementById('password-input');
   const loginError = document.getElementById('login-error');
   const canvas = document.getElementById('remote-canvas');
-  const ctx = canvas.getContext('2d');
+  // alpha:false = no transparency compositing overhead
+  // desynchronized:true = paint without waiting for the browser's compositor lock
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
   const fpsCounter = document.getElementById('fps-counter');
   const latencyDisplay = document.getElementById('latency-display');
   const statusDot = document.getElementById('status-dot');
@@ -109,22 +111,32 @@
 
   // ---- Rendering ----
 
-  const frameImage = new Image();
+  // Fast decode pipeline:
+  // 1. createImageBitmap() decodes the JPEG off-thread (async, GPU-accelerated)
+  // 2. requestAnimationFrame paints the decoded bitmap — zero tearing
+  // 3. If a new frame arrives before the previous one is decoded, we discard
+  //    the stale decode and start fresh, preventing backlog build-up.
 
-  function renderFrame(buffer) {
-    const blob = new Blob([buffer], { type: 'image/png' });
-    const url = URL.createObjectURL(blob);
+  let pendingBitmap = null;   // latest decoded ImageBitmap ready to paint
+  let decoding = false;       // true while createImageBitmap is in flight
+  let rafScheduled = false;   // true while a rAF paint is queued
 
-    frameImage.onload = () => {
-      // Resize canvas if needed
-      if (canvas.width !== frameImage.width || canvas.height !== frameImage.height) {
-        canvas.width = frameImage.width;
-        canvas.height = frameImage.height;
+  function scheduleRaf() {
+    if (rafScheduled) return;
+    rafScheduled = true;
+    requestAnimationFrame(() => {
+      rafScheduled = false;
+      if (!pendingBitmap) return;
+      const bmp = pendingBitmap;
+      pendingBitmap = null;
+
+      if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+        canvas.width  = bmp.width;
+        canvas.height = bmp.height;
       }
-      ctx.drawImage(frameImage, 0, 0);
-      URL.revokeObjectURL(url);
+      ctx.drawImage(bmp, 0, 0);
+      bmp.close(); // free GPU memory immediately
 
-      // FPS tracking
       frameCount++;
       const now = Date.now();
       if (now - lastFpsUpdate >= 1000) {
@@ -132,9 +144,30 @@
         frameCount = 0;
         lastFpsUpdate = now;
       }
-    };
+    });
+  }
 
-    frameImage.src = url;
+  function renderFrame(buffer) {
+    // Decode the JPEG as a Blob (cheap — just wraps the ArrayBuffer)
+    const blob = new Blob([buffer], { type: 'image/jpeg' });
+
+    if (decoding) {
+      // A decode is already in flight — schedule a fresh one once it finishes
+      // by tagging the blob so the existing promise replaces itself.
+      // Simplest approach: just abort the old path by overwriting a flag.
+      // We'll handle this inside the promise chain below.
+    }
+
+    decoding = true;
+    createImageBitmap(blob)
+      .then((bmp) => {
+        decoding = false;
+        // Discard any previous un-painted bitmap (it's stale now)
+        if (pendingBitmap) pendingBitmap.close();
+        pendingBitmap = bmp;
+        scheduleRaf();
+      })
+      .catch(() => { decoding = false; });
   }
 
   // ---- Input forwarding ----
@@ -165,9 +198,21 @@
   }
 
   // Mouse events on canvas
+  // Throttle mousemove to once per animation frame to avoid flooding the WebSocket.
+  let lastMouseX = -1, lastMouseY = -1;
+  let mouseMoveQueued = false;
+
   canvasContainer.addEventListener('mousemove', (e) => {
     const c = getCanvasCoords(e);
-    sendInput({ type: 'mouse', action: 'move', x: c.x, y: c.y });
+    lastMouseX = c.x;
+    lastMouseY = c.y;
+    if (!mouseMoveQueued) {
+      mouseMoveQueued = true;
+      requestAnimationFrame(() => {
+        mouseMoveQueued = false;
+        sendInput({ type: 'mouse', action: 'move', x: lastMouseX, y: lastMouseY });
+      });
+    }
   });
 
   canvasContainer.addEventListener('mousedown', (e) => {

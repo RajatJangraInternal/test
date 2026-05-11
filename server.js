@@ -228,6 +228,10 @@ function handleKeyboard(msg) {
 // ---- Screen Capture Loop ----
 let captureRunning = false;
 
+// Max bytes allowed in a client's WS send buffer before we skip the frame.
+// This prevents frame pile-ups when the network is slower than the capture rate.
+const MAX_BUFFERED = 4 * 1024 * 1024; // 4 MB
+
 async function captureLoop() {
   if (captureRunning) return;
   captureRunning = true;
@@ -243,11 +247,13 @@ async function captureLoop() {
 
     if (activeClients.length > 0) {
       try {
-        // Capture screenshot as PNG buffer
-        const imgBuffer = await screenshot({ format: 'png' });
+        // Capture as JPEG — far smaller than PNG, much faster to transmit
+        const imgBuffer = await screenshot({ format: 'jpg', quality: config.JPEG_QUALITY });
 
-        // Send PNG directly (no sharp needed)
         for (const ws of activeClients) {
+          // Backpressure: skip this frame if the client's send buffer is already full.
+          // This prevents unbounded memory growth and perceived input lag.
+          if (ws.bufferedAmount > MAX_BUFFERED) continue;
           try { ws.send(imgBuffer, { binary: true }); } catch { }
         }
       } catch (err) {
@@ -255,8 +261,10 @@ async function captureLoop() {
       }
     }
 
+    // Sleep only the remaining time so we stay close to target FPS
     const elapsed = Date.now() - startTime;
-    await new Promise((r) => setTimeout(r, Math.max(0, interval - elapsed)));
+    const sleep = interval - elapsed;
+    if (sleep > 0) await new Promise((r) => setTimeout(r, sleep));
   }
 }
 

@@ -9,11 +9,12 @@ module.exports = {
   // Password required to connect (CHANGE THIS!)
   PASSWORD: 'changeme123',
 
-  // Frames per second for screen capture
-  FPS: 12,
+  // Frames per second for screen capture (15-30 recommended)
+  FPS: 30,
 
-  // JPEG quality (1-100). Lower = smaller size, faster streaming
-  QUALITY: 50,
+  // JPEG quality (1-100). Lower = smaller size, faster streaming.
+  // 35-55 is the sweet spot for remote desktop.
+  JPEG_QUALITY: 45,
 
   // Allow remote mouse & keyboard control
   ENABLE_INPUT: true,
