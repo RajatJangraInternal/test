@@ -3,6 +3,24 @@
 // Zero native dependencies - can compile to .exe
 // ============================================
 
+// Catch crashes so the .exe window doesn't silently close
+process.on('uncaughtException', (err) => {
+  const msg = `[CRASH] ${err.stack || err.message || err}`;
+  console.error(msg);
+  try {
+    require('fs').writeFileSync(
+      require('path').join(__dirname, 'crash-log.txt'),
+      `${new Date().toISOString()}\n${msg}\n`,
+      'utf-8'
+    );
+  } catch {}
+  console.error('Press Ctrl+C to close...');
+  setInterval(() => {}, 60000);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[CRASH] Unhandled promise rejection:', err);
+});
+
 const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
