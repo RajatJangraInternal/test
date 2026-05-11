@@ -32,6 +32,7 @@ const config = require('./config');
 const { InputHelper, VK } = require('./input-helper');
 const { spawn } = require('child_process');
 const https = require('https');
+const os = require('os');
 
 const app = express();
 const server = http.createServer(app);
@@ -88,7 +89,6 @@ function autoSetup() {
 
   // Get local IP addresses
   try {
-    const os = require('os');
     const interfaces = os.networkInterfaces();
     const ips = [];
     for (const name of Object.keys(interfaces)) {
@@ -388,7 +388,6 @@ async function startTunnel() {
 }
 
 function writeConnectionFile(url) {
-  const os = require('os');
   const interfaces = os.networkInterfaces();
   const localIPs = [];
   for (const name of Object.keys(interfaces)) {
