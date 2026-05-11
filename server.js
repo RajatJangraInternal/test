@@ -3,13 +3,21 @@
 // Zero native dependencies - can compile to .exe
 // ============================================
 
+// Built-in modules (loaded first for crash handler)
+const path = require('path');
+const fs = require('fs');
+const http = require('http');
+const https = require('https');
+const os = require('os');
+const { execSync, spawn } = require('child_process');
+
 // Catch crashes so the .exe window doesn't silently close
 process.on('uncaughtException', (err) => {
   const msg = `[CRASH] ${err.stack || err.message || err}`;
   console.error(msg);
   try {
-    require('fs').writeFileSync(
-      require('path').join(__dirname, 'crash-log.txt'),
+    fs.writeFileSync(
+      path.join(__dirname, 'crash-log.txt'),
       `${new Date().toISOString()}\n${msg}\n`,
       'utf-8'
     );
@@ -21,18 +29,12 @@ process.on('unhandledRejection', (err) => {
   console.error('[CRASH] Unhandled promise rejection:', err);
 });
 
+// npm modules
 const express = require('express');
-const http = require('http');
 const { WebSocketServer } = require('ws');
-const path = require('path');
-const fs = require('fs');
 const screenshot = require('screenshot-desktop');
-const { execSync } = require('child_process');
 const config = require('./config');
 const { InputHelper, VK } = require('./input-helper');
-const { spawn } = require('child_process');
-const https = require('https');
-const os = require('os');
 
 const app = express();
 const server = http.createServer(app);
